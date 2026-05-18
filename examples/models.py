@@ -37,6 +37,29 @@ class DiceNet(nn.Module):
         return x
 
 
+class EmberNet(nn.Module):
+    """MLP for tabular malware-feature classification.
+
+    Parameterized by input dimension so the same class works for real
+    EMBER2024 inputs (input_dim=2381) and for the synthetic tabular
+    pipeline-validation dataset (input_dim=64 by default). The middle
+    layer is named fc2 because the GradNorm balancing code in
+    training/engine.py pulls parameters via N.fc2.parameters().
+    """
+
+    def __init__(self, input_dim: int = 2381, hidden_dim: int = 128, n_classes: int = 2):
+        super().__init__()
+        self.fc1 = nn.Linear(input_dim, hidden_dim)
+        self.fc2 = nn.Linear(hidden_dim, hidden_dim // 2)
+        self.fc3 = nn.Linear(hidden_dim // 2, n_classes)
+
+    def forward(self, x):
+        x = F.relu(self.fc1(x))
+        x = F.relu(self.fc2(x))
+        x = self.fc3(x)
+        return x
+
+
 class AlsomitraNet(nn.Module):
     def __init__(self):
         super(AlsomitraNet, self).__init__()

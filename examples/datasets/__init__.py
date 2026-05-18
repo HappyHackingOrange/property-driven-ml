@@ -16,6 +16,8 @@ from .fashion import create_fashion_mnist_datasets
 from .alsomitra import create_alsomitra_datasets, AlsomitraDataset
 from .dice import create_dice_datasets
 from .gtsrb import create_gtsrb_datasets
+from .synthetic_tabular import create_synthetic_tabular_datasets
+from .ember import create_ember_datasets
 
 
 # Registry of available dataset creators
@@ -25,6 +27,8 @@ DATASET_CREATORS: Dict[str, Callable] = {
     "alsomitra": create_alsomitra_datasets,
     "dice": create_dice_datasets,
     "gtsrb": create_gtsrb_datasets,
+    "synthetic_tabular": create_synthetic_tabular_datasets,
+    "ember": create_ember_datasets,
 }
 
 
