@@ -1,6 +1,9 @@
 """
 Head-to-head: standard cross-entropy training vs property-driven training,
 both on the same EMBER2024 slice, both evaluated against the same attack.
+Multi-seed replication: each seed varies the data subsample, the model
+initialization, and the DataLoader shuffle order; results are reported
+as mean ± std across seeds.
 
 The constraint is ``NonFunctionalRobustnessConstraint``: an attacker may
 perturb only the EMBER feature groups that correspond to "non-functional"
@@ -11,19 +14,19 @@ authenticode) are clamped to their original values.
 
 What the script prints:
 
-  - prediction accuracy on the test split (both models)
-  - constraint satisfaction on random samples inside the precondition
-    (both models)
-  - constraint security under PGD adversarial attack with the masked
-    epsilon ball (both models)
+  - per-seed: prediction accuracy, constraint sat (random), constraint
+    security (PGD), for both baseline and property-driven models.
+  - aggregate: mean ± std across all seeds.
 
 Run:
 
     PYTHONPATH=. uv run python -m examples.compare_ember_baseline_vs_pdml
 """
 
+import statistics
 import time
 
+import numpy as np
 import torch
 import torch.optim as optim
 import torch.nn.functional as F
@@ -124,40 +127,41 @@ def evaluate(model, device, test_loader, constraint, logic, attack_logic, mean, 
     )
 
 
-def main():
-    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-    stamp(f"device: {device}")
+def run_one_seed(
+    seed: int,
+    device: torch.device,
+    max_samples: int,
+    epochs: int,
+    epsilon: float,
+    delta: float,
+    batch_size: int = 256,
+) -> dict:
+    """Train one baseline + one property-driven model under the given seed
+    and return per-metric results on the test split."""
+    torch.manual_seed(seed)
+    np.random.seed(seed)
 
-    max_samples = 20_000
-    epochs = 3
-    epsilon = 0.5
-    delta = 0.5
-
-    stamp(f"Loading EMBER2024 (max_samples={max_samples})...")
     train_loader, test_loader, model_baseline, (mean, std), mode = (
         create_ember_datasets(
-            batch_size=256,
+            batch_size=batch_size,
             max_samples=max_samples,
+            seed=seed,
         )
     )
     model_baseline = model_baseline.to(device)
 
-    # Get a fresh copy of the same architecture for the property-driven model
-    # so the two runs are matched.
+    # Match initial weights between the two models so the only difference
+    # is the training objective, not the init.
     _, _, model_pdml, _, _ = create_ember_datasets(
-        batch_size=256,
+        batch_size=batch_size,
         max_samples=max_samples,
+        seed=seed,
     )
     model_pdml = model_pdml.to(device)
-    # Force the same initial weights so the comparison isn't init-noise.
     model_pdml.load_state_dict(model_baseline.state_dict())
 
-    stamp("=== Training baseline (cross-entropy only) ===")
-    t0 = time.time()
     train_baseline(model_baseline, device, train_loader, epochs)
-    stamp(f"  baseline trained in {time.time() - t0:.1f}s")
 
-    stamp("=== Training property-driven (cross-entropy + constraint loss) ===")
     constraint_train = NonFunctionalRobustnessConstraint(
         device=device,
         epsilon=epsilon,
@@ -174,7 +178,6 @@ def main():
         mean=mean,
         std=std,
     )
-    t0 = time.time()
     train_property_driven(
         model_pdml,
         device,
@@ -185,18 +188,15 @@ def main():
         epochs,
         mode,
     )
-    stamp(f"  property-driven trained in {time.time() - t0:.1f}s")
 
-    stamp("=== Evaluation on test split ===")
     constraint_eval = NonFunctionalRobustnessConstraint(
         device=device,
         epsilon=epsilon,
         delta=delta,
         std=std,
     )
-    logic_eval = logics.QLL()  # common reference logic for attacks
-    stamp("  evaluating baseline...")
-    base_acc, base_constr_random, base_constr_sec = evaluate(
+    logic_eval = logics.QLL()
+    base_acc, base_cr, base_cs = evaluate(
         model_baseline,
         device,
         test_loader,
@@ -206,8 +206,7 @@ def main():
         mean,
         std,
     )
-    stamp("  evaluating pdml...")
-    pdml_acc, pdml_constr_random, pdml_constr_sec = evaluate(
+    pdml_acc, pdml_cr, pdml_cs = evaluate(
         model_pdml,
         device,
         test_loader,
@@ -217,17 +216,66 @@ def main():
         mean,
         std,
     )
+    return {
+        "baseline_acc": base_acc,
+        "baseline_constr_random": base_cr,
+        "baseline_constr_sec": base_cs,
+        "pdml_acc": pdml_acc,
+        "pdml_constr_random": pdml_cr,
+        "pdml_constr_sec": pdml_cs,
+    }
+
+
+def _fmt(vals: list[float]) -> str:
+    mean = statistics.mean(vals)
+    if len(vals) > 1:
+        return f"{mean:.3f} ± {statistics.stdev(vals):.3f}"
+    return f"{mean:.3f}"
+
+
+def main():
+    device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+    stamp(f"device: {device}")
+
+    seeds = [0, 1, 2, 3, 4]
+    max_samples = 20_000
+    epochs = 3
+    epsilon = 0.5
+    delta = 0.5
+
+    results = []
+    for seed in seeds:
+        stamp(f"=== seed {seed} ===")
+        t0 = time.time()
+        r = run_one_seed(
+            seed=seed,
+            device=device,
+            max_samples=max_samples,
+            epochs=epochs,
+            epsilon=epsilon,
+            delta=delta,
+        )
+        stamp(
+            f"  seed {seed} done in {time.time() - t0:.1f}s | "
+            f"baseline: acc={r['baseline_acc']:.3f} sec={r['baseline_constr_sec']:.3f} | "
+            f"pdml: acc={r['pdml_acc']:.3f} sec={r['pdml_constr_sec']:.3f}"
+        )
+        results.append(r)
 
     print()
-    print("  metric                          baseline    pdml")
-    print("  ----------------------------    --------  --------")
-    print(f"  prediction accuracy             {base_acc:8.3f}  {pdml_acc:8.3f}")
+    print(f"=== Aggregate across {len(seeds)} seeds ===")
+    print("  metric                          baseline (mean ± std)   pdml (mean ± std)")
     print(
-        f"  constraint sat (random pert.)   {base_constr_random:8.3f}  {pdml_constr_random:8.3f}"
+        "  ----------------------------    ----------------------  ----------------------"
     )
-    print(
-        f"  constraint security (PGD)       {base_constr_sec:8.3f}  {pdml_constr_sec:8.3f}"
-    )
+    for key, label in [
+        ("acc", "prediction accuracy"),
+        ("constr_random", "constraint sat (random pert.)"),
+        ("constr_sec", "constraint security (PGD)"),
+    ]:
+        b_vals = [r[f"baseline_{key}"] for r in results]
+        p_vals = [r[f"pdml_{key}"] for r in results]
+        print(f"  {label:30s}  {_fmt(b_vals):22s}  {_fmt(p_vals):22s}")
     print()
 
 
