@@ -38,40 +38,59 @@ DEFAULT_DATA_DIR = os.path.expanduser("~/data/ember2024")
 
 
 class EmberDataset(torch.utils.data.Dataset):
-    """Wraps an EMBER2024 numpy array (typically memmapped by thrember)
-    with per-sample z-score normalization. Avoids loading the full dataset
-    into RAM; the per-feature ``mean`` and ``std`` are small (length =
-    feature dim) and live in memory.
+    """Wraps an EMBER2024 feature memmap with per-sample z-score normalization
+    via an index array. Never materializes the full feature matrix:
+
+    - ``X`` is a memmap (or memmap-like ndarray) of shape ``(N_total, dim)``.
+    - ``y`` is an in-memory int array of shape ``(N_total,)`` (small).
+    - ``indices`` selects which rows of ``X`` / ``y`` are actually used
+      (labeled-binary filter plus any subsampling).
+
+    PyTorch's DataLoader reads samples one at a time, so the memmap only
+    touches the row pages it needs per batch.
     """
 
     def __init__(
         self,
         X: np.ndarray,
         y: np.ndarray,
+        indices: np.ndarray,
         mean: np.ndarray,
         std: np.ndarray,
     ):
         self.X = X
         self.y = y
+        self.indices = indices
         self.mean = mean.astype(np.float32)
         # Avoid divide-by-zero on constant features.
         self.std = np.where(std == 0.0, 1.0, std).astype(np.float32)
 
     def __len__(self) -> int:
-        return len(self.X)
+        return len(self.indices)
 
     def __getitem__(self, idx: int):
-        x = (self.X[idx].astype(np.float32) - self.mean) / self.std
-        return torch.from_numpy(x), int(self.y[idx])
+        real_idx = int(self.indices[idx])
+        x = (self.X[real_idx].astype(np.float32) - self.mean) / self.std
+        return torch.from_numpy(x), int(self.y[real_idx])
 
 
-def _filter_labeled_binary(
-    X: np.ndarray, y: np.ndarray
+def _open_memmap(
+    data_dir: str, subset: str, ndim: int
 ) -> Tuple[np.ndarray, np.ndarray]:
-    """EMBER encodes unlabeled samples as -1 in the binary malicious/benign
-    label. Drop those rows for binary classification."""
-    mask = (y == 0) | (y == 1)
-    return X[mask], y[mask].astype(np.int64)
+    """Open the ``X_{subset}.dat`` and ``y_{subset}.dat`` memmaps thrember
+    writes during vectorization, without materializing them in RAM.
+
+    Equivalent to ``thrember.read_vectorized_features`` minus its
+    ``np.array(X)`` call that forces the data into memory.
+    """
+    X_path = os.path.join(data_dir, f"X_{subset}.dat")
+    y_path = os.path.join(data_dir, f"y_{subset}.dat")
+    X = np.memmap(X_path, dtype=np.float32, mode="r").reshape(-1, ndim)
+    # y is small (one int32 per row) and we need it for filtering and
+    # subsampling, so materialize it explicitly. Copy out of the memmap to
+    # avoid surprises if the file is closed later.
+    y = np.array(np.memmap(y_path, dtype=np.int32, mode="r"))
+    return X, y
 
 
 def _ensure_dataset_ready(data_dir: str, download_if_missing: bool) -> None:
@@ -162,7 +181,7 @@ def create_ember_datasets(
         )
 
     try:
-        import thrember
+        from thrember import PEFeatureExtractor
     except ImportError as e:
         raise ImportError(
             "thrember is required to load EMBER2024. Install with:\n"
@@ -176,35 +195,60 @@ def create_ember_datasets(
 
     _ensure_dataset_ready(data_dir, download_if_missing)
 
-    X_train, y_train = thrember.read_vectorized_features(data_dir, subset="train")
-    X_test, y_test = thrember.read_vectorized_features(data_dir, subset="test")
+    # Get feature dim from thrember's extractor; current value is 2568 for
+    # EMBER2024 feature version 3, but reading from the extractor keeps us
+    # robust to future feature-set updates.
+    ndim = PEFeatureExtractor().dim
 
-    X_train, y_train = _filter_labeled_binary(X_train, y_train)
-    X_test, y_test = _filter_labeled_binary(X_test, y_test)
+    # Open the disk memmaps directly. We deliberately do NOT use
+    # thrember.read_vectorized_features here because that wraps the open
+    # in np.array(...).reshape(...), which materializes ~54 GB for the
+    # train split. Reading the memmap and reshaping returns a view, not
+    # a copy, so RAM use stays bounded by the batch size.
+    X_train, y_train = _open_memmap(data_dir, "train", ndim)
+    X_test, y_test = _open_memmap(data_dir, "test", ndim)
 
+    # Label-filter for the binary task: keep rows where y is 0 or 1.
+    # Filtering is done on indices, not on X, so we never materialize.
+    train_labeled = np.where((y_train == 0) | (y_train == 1))[0]
+    test_labeled = np.where((y_test == 0) | (y_test == 1))[0]
+
+    # Optional subsampling.
+    rng = np.random.default_rng(seed)
     if max_samples is not None:
-        rng = np.random.default_rng(seed)
-        n_train = min(max_samples, len(X_train))
-        n_test = min(max(max_samples // 5, 1), len(X_test))
-        train_idx = rng.choice(len(X_train), size=n_train, replace=False)
-        test_idx = rng.choice(len(X_test), size=n_test, replace=False)
-        X_train, y_train = X_train[train_idx], y_train[train_idx]
-        X_test, y_test = X_test[test_idx], y_test[test_idx]
+        n_train = min(max_samples, len(train_labeled))
+        n_test = min(max(max_samples // 5, 1), len(test_labeled))
+        train_idx = rng.choice(train_labeled, size=n_train, replace=False)
+        test_idx = rng.choice(test_labeled, size=n_test, replace=False)
+    else:
+        train_idx = train_labeled
+        test_idx = test_labeled
 
-    # Compute z-score statistics on the training split only. Works on
-    # memmaps by streaming internally in numpy; slow for the full split
-    # but only happens once per process.
-    mean = X_train.mean(axis=0)
-    std = X_train.std(axis=0)
+    # Compute z-score statistics from a bounded sample of the training rows
+    # we actually plan to use. Reading the full ~50 GB matrix to compute
+    # exact stats would defeat the purpose of memmapping. 100k rows is
+    # plenty for stable per-feature mean/std on this dataset.
+    n_stats = min(len(train_idx), 100_000)
+    if len(train_idx) > n_stats:
+        stats_idx = rng.choice(train_idx, size=n_stats, replace=False)
+    else:
+        stats_idx = train_idx
+    # Sort indices so the memmap reads contiguously where possible.
+    stats_sample = X_train[np.sort(stats_idx)]
+    mean = stats_sample.mean(axis=0).astype(np.float32)
+    std = stats_sample.std(axis=0).astype(np.float32)
 
-    train_ds = EmberDataset(X_train, y_train, mean, std)
-    test_ds = EmberDataset(X_test, y_test, mean, std)
+    # y as int64 once, in RAM (small).
+    y_train_i64 = y_train.astype(np.int64)
+    y_test_i64 = y_test.astype(np.int64)
+
+    train_ds = EmberDataset(X_train, y_train_i64, train_idx, mean, std)
+    test_ds = EmberDataset(X_test, y_test_i64, test_idx, mean, std)
 
     train_loader = DataLoader(train_ds, batch_size=batch_size, shuffle=True)
     test_loader = DataLoader(test_ds, batch_size=batch_size, shuffle=False)
 
-    n_features = X_train.shape[1]
-    model = EmberNet(input_dim=n_features, n_classes=2)
+    model = EmberNet(input_dim=ndim, n_classes=2)
 
     return (
         train_loader,
