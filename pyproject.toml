@@ -99,6 +99,14 @@ deploy = [
     "twine>=6.1.0",
     "build>=1.0.0",  # For building packages if needed
 ]
+ember = [
+    # Official EMBER2024 loader. Pulls down the dataset from HuggingFace
+    # and produces vectorized numpy ndarrays consumed by
+    # examples/datasets/ember.py. Not a hard dependency because the
+    # download is large and most users of property-driven-ml will not
+    # need it.
+    "thrember @ git+https://github.com/FutureComputing4AI/EMBER2024",
+]
 
 # Pytest configuration
 [tool.pytest.ini_options]
