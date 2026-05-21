@@ -1595,6 +1595,7 @@ dev = [
     { name = "ruff" },
 ]
 ember = [
+    { name = "signify" },
     { name = "thrember" },
 ]
 test = [
@@ -1631,7 +1632,10 @@ dev = [
     { name = "pytest-cov", specifier = ">=4.0" },
     { name = "ruff", specifier = ">=0.1.0" },
 ]
-ember = [{ name = "thrember", git = "https://github.com/FutureComputing4AI/EMBER2024" }]
+ember = [
+    { name = "signify", specifier = "<0.9" },
+    { name = "thrember", git = "https://github.com/FutureComputing4AI/EMBER2024" },
+]
 test = [
     { name = "pytest", specifier = ">=8.0.0" },
     { name = "pytest-cov", specifier = ">=6.0.0" },
@@ -2048,7 +2052,7 @@ wheels = [
 
 [[package]]
 name = "signify"
-version = "0.9.2"
+version = "0.8.1"
 source = { registry = "https://pypi.org/simple" }
 dependencies = [
     { name = "asn1crypto" },
@@ -2057,9 +2061,9 @@ dependencies = [
     { name = "oscrypto" },
     { name = "typing-extensions" },
 ]
-sdist = { url = "https://files.pythonhosted.org/packages/a7/d4/420073deaaf9caa50e0daa5a04d5247ae5a174f515b35f932ba8e6f7ce3a/signify-0.9.2.tar.gz", hash = "sha256:e504d26184b4df3802104d1bdd9c5074c030246c9febf184acd694822d610287", size = 90408, upload-time = "2025-12-31T09:04:07.755Z" }
+sdist = { url = "https://files.pythonhosted.org/packages/eb/c0/93d6f67f3e1125fb400cf734356fcf30daaac2cfb99555fa6a27031c9ded/signify-0.8.1.tar.gz", hash = "sha256:2c70c60caf676226fdde2009a03daf4a71063ec1d74263f1753e0c1a67c3b38a", size = 57346, upload-time = "2025-08-16T15:39:54.292Z" }
 wheels = [
-    { url = "https://files.pythonhosted.org/packages/b0/21/8d4579d439b3c03ae5cf5fb5e0d9151d34b4d9e24a50876ea211c2f48d3b/signify-0.9.2-py3-none-any.whl", hash = "sha256:9bbe43a2198dc8f21ae6c3c41227b695b4c3b7c242e2d2b19c3af7af4f29d2c5", size = 88353, upload-time = "2025-12-31T09:04:06.589Z" },
+    { url = "https://files.pythonhosted.org/packages/4a/aa/b78ff461095706092cad649a3688f1f015878905c2ad088b05a89d615632/signify-0.8.1-py3-none-any.whl", hash = "sha256:1eae199d6cccb9b2745179acf80af71dbc09a1d13b62eb70213c8470e55a6ee1", size = 58411, upload-time = "2025-08-16T15:39:52.937Z" },
 ]
 
 [[package]]
