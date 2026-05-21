@@ -28,11 +28,11 @@ import torch
 import torch.optim as optim
 
 import property_driven_ml.logics as logics
-import property_driven_ml.constraints as constraints
 import property_driven_ml.training as training
 from property_driven_ml.training import train, test
 
 from examples.datasets.ember import create_ember_datasets
+from examples.malware_constraints import NonFunctionalRobustnessConstraint
 
 
 def stamp(msg: str) -> None:
@@ -46,7 +46,7 @@ def main():
     batch_size = 256
     epochs = 3
     max_samples = 50_000  # train rows; test gets max_samples // 5
-    epsilon = 0.05
+    epsilon = 0.5  # bigger than the all-features case; masked constraint
     delta = 0.5
 
     stamp(f"Loading EMBER2024 (max_samples={max_samples})...")
@@ -60,7 +60,7 @@ def main():
     model = model.to(device)
 
     logic = logics.LeakyLogic()
-    constraint = constraints.StrongClassificationRobustnessConstraint(
+    constraint = NonFunctionalRobustnessConstraint(
         device=device,
         epsilon=epsilon,
         delta=delta,
