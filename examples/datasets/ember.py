@@ -93,6 +93,53 @@ def _open_memmap(
     return X, y
 
 
+def _compute_feature_stats(
+    X: np.ndarray,
+    indices: np.ndarray,
+    ndim: Optional[int] = None,
+    chunk: int = 50_000,
+    std_eps: float = 1e-6,
+) -> Tuple[np.ndarray, np.ndarray]:
+    """Per-feature z-score statistics over the full set of ``indices``,
+    accumulated in float64 and streamed in sorted chunks so peak memory
+    stays bounded by ``chunk`` rows regardless of subset size.
+
+    float64 is load-bearing here: a float32 sum-of-squares overflows to inf
+    on an ultra-sparse, large-valued feature once the subset exceeds ~100k
+    rows, which under the previous sampled-float32 path silently forced that
+    feature's std to inf and zeroed the column (see scale/RESULTS.md).
+    Streaming over the whole subset, instead of a 100k sample, also stops
+    features that are zero only within a sample from being mis-standardized.
+    Combination uses Chan's parallel mean/variance update (single pass,
+    numerically stable). The ``std_eps`` floor guards constant or
+    near-constant features against division by zero.
+
+    Returns (mean, std) as float32, the standardization EmberDataset applies
+    per sample. Matches scale/prep_scale_arrays.py so the CPU loader and the
+    scale pipeline standardize identically.
+    """
+    if ndim is None:
+        ndim = X.shape[1]
+    sorted_idx = np.sort(indices)
+    n = len(sorted_idx)
+    count = 0
+    mean = np.zeros(ndim, dtype=np.float64)
+    m2 = np.zeros(ndim, dtype=np.float64)
+    for start in range(0, n, chunk):
+        block = X[sorted_idx[start : start + chunk]].astype(np.float64)
+        bn = block.shape[0]
+        bmean = block.mean(axis=0)
+        bm2 = ((block - bmean) ** 2).sum(axis=0)
+        delta = bmean - mean
+        new_count = count + bn
+        mean += delta * (bn / new_count)
+        m2 += bm2 + (delta**2) * (count * bn / new_count)
+        count = new_count
+    std = np.sqrt(m2 / count)
+    std = np.where(std < std_eps, 1.0, std)
+    return mean.astype(np.float32), std.astype(np.float32)
+
+
 def _ensure_dataset_ready(data_dir: str, download_if_missing: bool) -> None:
     """Make sure ``data_dir`` contains vectorized EMBER2024 features. If
     ``download_if_missing`` is True and the directory looks empty, download
@@ -224,19 +271,13 @@ def create_ember_datasets(
         train_idx = train_labeled
         test_idx = test_labeled
 
-    # Compute z-score statistics from a bounded sample of the training rows
-    # we actually plan to use. Reading the full ~50 GB matrix to compute
-    # exact stats would defeat the purpose of memmapping. 100k rows is
-    # plenty for stable per-feature mean/std on this dataset.
-    n_stats = min(len(train_idx), 100_000)
-    if len(train_idx) > n_stats:
-        stats_idx = rng.choice(train_idx, size=n_stats, replace=False)
-    else:
-        stats_idx = train_idx
-    # Sort indices so the memmap reads contiguously where possible.
-    stats_sample = X_train[np.sort(stats_idx)]
-    mean = stats_sample.mean(axis=0).astype(np.float32)
-    std = stats_sample.std(axis=0).astype(np.float32)
+    # Per-feature z-score statistics over the full training subset, in
+    # float64 and streamed in chunks (see _compute_feature_stats). A bounded
+    # 100k sample in float32 was previously used here, but above ~100k
+    # samples that overflowed an ultra-sparse feature's std to inf and zeroed
+    # the column; computing over the whole subset in float64 fixes that and
+    # matches scale/prep_scale_arrays.py.
+    mean, std = _compute_feature_stats(X_train, train_idx, ndim)
 
     # y as int64 once, in RAM (small).
     y_train_i64 = y_train.astype(np.int64)
