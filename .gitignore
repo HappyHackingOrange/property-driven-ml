@@ -23,3 +23,5 @@ data/
 
 # API credentials
 .pypirc
+.coverage
+coverage.xml
